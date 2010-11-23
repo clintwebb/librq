@@ -56,8 +56,7 @@
 
 
 // pulled in from libevent 2.0.3 (alpha) to add compatibility for older libevents.
-int
-evutil_parse_sockaddr_port(const char *ip_as_string, struct sockaddr *out, int *outlen)
+int evutil_parse_sockaddr_port(const char *ip_as_string, struct sockaddr *out, int *outlen)
 {
 	int port;
 	char buf[128];
