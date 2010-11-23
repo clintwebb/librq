@@ -1,5 +1,21 @@
 TODO:
 
- split rq_service stuff into its own library.
+ * add GPL licence.
 
- manpage: 
+ * manpage: rq_queue_init
+ * manpage: rq_queue_free
+ * manpage: rq_shutdown
+ * manpage: rq_cleanup
+ * manpage: rq_setevbase
+ * manpage: rq_addcontroller
+ * manpage: rq_consume
+ * manpage: rq_init
+ * manpage: rq_msg_new
+ * manpage: rq_msg_clear 
+ * manpage: rq_msg_setqueue
+ * manpage: rq_msg_setbroadcast
+ * manpage: rq_msg_setnoreply
+ * manpage: rq_msg_setdata
+ * manpage: rq_send
+ * manpage: rq_reply
+
