@@ -24,6 +24,10 @@
 	#error "Incorrect rq.h header version."
 #endif
 
+#if (RQ_PROTO_VERSION < 0x00010000)
+	#error "Need rq-proto.h v1.0 or higher"
+#endif
+
 
 // libevent compatability.   If libevent1.x is used, it doesnt have as much stuff as libevent2.0
 #ifdef LIBEVENT_OLD_VER  
@@ -31,13 +35,11 @@
 	// event_new is a 2.0 function that creates a new event, sets it and then returns the pointer to the new event structure.   1.4 does not have that function, so we wrap an event_set here instead.
 	struct event * event_new(struct event_base *evbase, evutil_socket_t sfd, short flags, void (*fn)(int, short, void *), void *arg) {
 		struct event *ev;
-		
 		assert(evbase && sfd >= 0 && flags != 0 && fn);
 		ev = calloc(1, sizeof(*ev));
 		assert(ev);
 		event_set(ev, sfd, flags, fn, arg);
 		event_base_set(evbase, ev);
-		
 		return(ev);
 	}
 
