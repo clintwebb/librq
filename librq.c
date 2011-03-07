@@ -70,6 +70,8 @@
 		* ipv4:port
 		* ipv4
 		*/
+
+// 		printf("evutil_parse_sockaddr_port: '%s'\n", ip_as_string);
 		
 		cp = strchr(ip_as_string, ':');
 		if (*ip_as_string == '[') {
@@ -259,7 +261,7 @@ static void rq_connect(rq_t *rq)
 			assert(errno == EINPROGRESS);
 	
 			assert(conn->inbuf == NULL);
-			assert(conn->outbuf == NULL);
+			assert(conn->outbuf);
 			assert(conn->readbuf == NULL);
 
 			assert(conn->data == NULL);
@@ -306,11 +308,8 @@ static void rq_conn_closed(rq_conn_t *conn)
 		conn->inbuf = NULL;
 	}
 	
-	if (conn->outbuf) {
-		expbuf_clear(conn->outbuf);
-		expbuf_pool_return(conn->rq->bufpool, conn->outbuf);
-		conn->outbuf = NULL;
-	}
+	assert(conn->outbuf);
+	expbuf_clear(conn->outbuf);
 
 	// cleanup the data structure.
 	if (conn->data) {
@@ -368,13 +367,6 @@ static void rq_senddata(rq_conn_t *conn, char *data, int length)
 	assert(length > 0);
 	assert(conn->handle != INVALID_HANDLE);
 
-	// if we dont already have a buffer, then create one.
-	if (conn->outbuf == NULL) {
-		assert(conn->rq);
-		assert(conn->rq->bufpool);
-		conn->outbuf = expbuf_pool_new(conn->rq->bufpool, length);
-	}
-
 	// add the new data to the buffer.
 	assert(conn->outbuf);
 	expbuf_add(conn->outbuf, data, length);
@@ -384,7 +376,10 @@ static void rq_senddata(rq_conn_t *conn, char *data, int length)
 		assert(conn->rq);
 		assert(conn->rq->evbase);
 		conn->write_event = event_new(conn->rq->evbase, conn->handle, EV_WRITE | EV_PERSIST, rq_write_handler, conn);
+		assert(conn->write_event);
 		event_add(conn->write_event, NULL);
+		
+// 		printf("rq_senddata: created WRITE event for socket:%d.\n", conn->handle);
 	}
 }
 
@@ -501,6 +496,12 @@ void rq_cleanup(rq_t *rq)
 		assert(conn->write_event == NULL);
 		assert(conn->connect_event == NULL);
 
+		assert(conn->outbuf);
+		assert(conn->rq);
+		assert(conn->rq->bufpool);
+		expbuf_pool_return(conn->rq->bufpool, conn->outbuf);
+		conn->outbuf = NULL;
+		
 		conn->rq = NULL;
 		conn->risp = NULL;
 	
@@ -509,9 +510,7 @@ void rq_cleanup(rq_t *rq)
 		conn->hostname = NULL;
 
 		assert(conn->inbuf == NULL);
-		assert(conn->outbuf == NULL);
 		assert(conn->readbuf == NULL);
-
 		assert(conn->data == NULL);
 	}
 	assert(ll_count(&rq->connlist) == 0);
@@ -689,13 +688,17 @@ static void rq_write_handler(int fd, short int flags, void *arg)
 	assert(BUF_LENGTH(conn->outbuf) > 0);
 	assert(conn->active > 0);
 	
+// 	printf("rq_write_handler: attempting to send %d bytes for socket: %d\n", BUF_LENGTH(conn->outbuf), fd);
+	
 	// send the data that is waiting in the outbuffer.
 	res = send(conn->handle, BUF_DATA(conn->outbuf), BUF_LENGTH(conn->outbuf), 0);
 	if (res > 0) {
 		assert(res <= BUF_LENGTH(conn->outbuf));
 		expbuf_purge(conn->outbuf, res);
+// 		printf("rq_write_handler: sent %d bytes for socket: %d\n", res, fd);
 	}
-	else 	if (res == 0 || (res == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+	else if (res == 0 || (res == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+// 		printf("rq_write_handler: closing socket %d.\n", fd);
 		assert(conn);
 		rq_conn_closed(conn);
 	}
@@ -706,12 +709,6 @@ static void rq_write_handler(int fd, short int flags, void *arg)
 		// clear the write event
 		event_free(conn->write_event);
 		conn->write_event = NULL;
-
-		// return the outbuffer to the pool.
-		assert(conn->rq);
-		assert(conn->rq->bufpool);
-		expbuf_pool_return(conn->rq->bufpool, conn->outbuf);
-		conn->outbuf = NULL;
 	}
 }	
 
@@ -816,7 +813,8 @@ static void rq_connect_handler(int fd, short int flags, void *arg)
 		event_add(conn->read_event, NULL);
 	
 		// if we have data in our out buffer, we need to create the WRITE event.
-		if (conn->outbuf && BUF_LENGTH(conn->outbuf) > 0) {
+		assert(conn->outbuf);
+		if (BUF_LENGTH(conn->outbuf) > 0) {
 			assert(conn->handle != INVALID_HANDLE && conn->handle > 0);
 			assert(conn->write_event == NULL);
 			assert(conn->rq->evbase);
@@ -885,19 +883,21 @@ void rq_addcontroller(
 	assert(dropped_handler == NULL);
 	assert(arg == NULL);
 
-	conn = (rq_conn_t *) malloc(sizeof(rq_conn_t));
+	conn = calloc(1, sizeof(rq_conn_t));
 	assert(conn);
 	
 	conn->hostname = strdup(host);
 
 	conn->handle = INVALID_HANDLE;		// socket handle to the connected controller.
-	conn->read_event = NULL;
-	conn->write_event = NULL;
-	conn->connect_event = NULL;
+	assert(conn->read_event == NULL);
+	assert(conn->write_event == NULL);
+	assert(conn->connect_event == NULL);
 
-	conn->readbuf = NULL;	
-	conn->inbuf = NULL;
-	conn->outbuf = NULL;
+	assert(rq->bufpool);
+	assert(conn->readbuf == NULL);
+	assert(conn->inbuf == NULL);
+	conn->outbuf = expbuf_pool_new(rq->bufpool, 512);
+	assert(conn->outbuf);
 
 	assert(rq->risp);
 	conn->risp = rq->risp;
