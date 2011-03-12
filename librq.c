@@ -20,7 +20,7 @@
 #include <unistd.h>
 
 
-#if (LIBRQ_VERSION != 0x00010900)
+#if (LIBRQ_VERSION != 0x00010910)
 	#error "Incorrect rq.h header version."
 #endif
 
@@ -135,9 +135,9 @@ static void rq_connect_handler(int fd, short int flags, void *arg);
 
 
 
-static void rq_data_init(rq_data_t *data, expbuf_pool_t *pool)
+static void rq_data_init(rq_data_t *data)
 {
-	assert(data && pool);
+	assert(data);
 	
 	data->flags = 0;
 	data->mask = 0;
@@ -148,28 +148,25 @@ static void rq_data_init(rq_data_t *data, expbuf_pool_t *pool)
 	data->priority = 0;
 
 	// we dont allocate the payload object yet, because we need to move it to
-	// the message processing it.  Therefore, we will always get new payload
-	// buffers from the bufpool when needed.
+	// the message processing it.
 	data->payload = NULL;
-	
-	data->queue = expbuf_pool_new(pool, 0);
-	assert(data->queue);
+	data->queue = expbuf_init(NULL, 0);
 }
 
-static void rq_data_free(rq_data_t *data, expbuf_pool_t *pool)
+static void rq_data_free(rq_data_t *data)
 {
-	assert(data && pool);
+	assert(data);
 
 	if (data->payload) {
 		expbuf_clear(data->payload);
-		expbuf_pool_return(pool, data->payload);
-		data->payload = NULL;
+		data->payload = expbuf_free(data->payload);
+		assert(data->payload == NULL);
 	}
 
 	assert(data->queue);
 	expbuf_clear(data->queue);
-	expbuf_pool_return(pool, data->queue);
-	data->queue = NULL;
+	data->queue = expbuf_free(data->queue);
+	assert(data->queue == NULL);
 }
 
 
@@ -289,23 +286,26 @@ static void rq_conn_closed(rq_conn_t *conn)
 	
 	assert(conn);
 	assert(conn->rq);
-	assert(conn->rq->bufpool);
 
 	assert(conn->handle != INVALID_HANDLE);
 	close(conn->handle);
 	conn->handle = INVALID_HANDLE;
 
 	// free all the buffers.
-	if (conn->readbuf) {
-		assert(BUF_LENGTH(conn->readbuf) == 0);
-		expbuf_pool_return(conn->rq->bufpool, conn->readbuf);
-		conn->readbuf = NULL;
-	}
+	assert(conn->readbuf);
+	assert(BUF_LENGTH(conn->readbuf) == 0);
+	conn->readbuf = expbuf_free(conn->readbuf);
+	assert(conn->readbuf == NULL);
+
+	assert(conn->sendbuf);
+	assert(BUF_LENGTH(conn->sendbuf) == 0);
+	conn->sendbuf = expbuf_free(conn->sendbuf);
+	assert(conn->sendbuf == NULL);
 
 	if (conn->inbuf) {
 		expbuf_clear(conn->inbuf);
-		expbuf_pool_return(conn->rq->bufpool, conn->inbuf);
-		conn->inbuf = NULL;
+		conn->inbuf = expbuf_free(conn->inbuf);
+		assert(conn->inbuf == NULL);
 	}
 	
 	assert(conn->outbuf);
@@ -313,7 +313,7 @@ static void rq_conn_closed(rq_conn_t *conn)
 
 	// cleanup the data structure.
 	if (conn->data) {
-		rq_data_free(conn->data, conn->rq->bufpool);
+		rq_data_free(conn->data);
 		free(conn->data);
 		conn->data = NULL;
 	}
@@ -497,10 +497,8 @@ void rq_cleanup(rq_t *rq)
 		assert(conn->connect_event == NULL);
 
 		assert(conn->outbuf);
-		assert(conn->rq);
-		assert(conn->rq->bufpool);
-		expbuf_pool_return(conn->rq->bufpool, conn->outbuf);
-		conn->outbuf = NULL;
+		conn->outbuf = expbuf_free(conn->outbuf);
+		assert(conn->outbuf == NULL);
 		
 		conn->rq = NULL;
 		conn->risp = NULL;
@@ -538,11 +536,6 @@ void rq_cleanup(rq_t *rq)
 	ll_free(rq->msg_pool);
 	free(rq->msg_pool);
 	rq->msg_pool = NULL;
-
-	assert(rq->bufpool);
-	expbuf_pool_free(rq->bufpool);
-	free(rq->bufpool);
-	rq->bufpool = NULL;
 }
 
 
@@ -611,7 +604,7 @@ static void rq_process_read(rq_conn_t *conn)
 				// if there is data left over, then we need to add it to our in-buffer.
 				if (BUF_LENGTH(conn->readbuf) > 0) {
 					assert(conn->inbuf == NULL);
-					conn->inbuf = expbuf_pool_new(conn->rq->bufpool, BUF_LENGTH(conn->readbuf));
+					conn->inbuf = expbuf_init(NULL, BUF_LENGTH(conn->readbuf));
 					assert(conn->inbuf);
 					
 					expbuf_add(conn->inbuf, BUF_DATA(conn->readbuf), BUF_LENGTH(conn->readbuf));
@@ -635,9 +628,9 @@ static void rq_process_read(rq_conn_t *conn)
 				if (res > 0) { expbuf_purge(conn->inbuf, res); }
 
 				if (BUF_LENGTH(conn->inbuf) == 0) {
-					// the in buffer is now empty, so we should return it to the pool.
-					expbuf_pool_return(conn->rq->bufpool, conn->inbuf);
-					conn->inbuf = NULL;
+					// the in buffer is now empty, so we should free it.
+					conn->inbuf = expbuf_free(conn->inbuf);
+					assert(conn->inbuf == NULL);
 				}
 			}
 			
@@ -718,8 +711,6 @@ static void rq_write_handler(int fd, short int flags, void *arg)
 // This internal function is used to actually send a queue consume request 
 static void rq_send_consume(rq_conn_t *conn, rq_queue_t *queue)
 {
-	expbuf_t *buf;
-	
 	assert(conn);
 	assert(queue);
 
@@ -728,24 +719,21 @@ static void rq_send_consume(rq_conn_t *conn, rq_queue_t *queue)
 	assert(strlen(queue->queue) > 0 && strlen(queue->queue) < 256);
 
 	// get a buffer from the bufpool.
-	assert(conn->rq);
-	assert(conn->rq->bufpool);
-	buf = expbuf_pool_new(conn->rq->bufpool, 32);
+	assert(conn->sendbuf);
+	assert(BUF_LENGTH(conn->sendbuf) == 0);
+	
 
 	// send consume request to controller.
-	addCmd(buf, RQ_CMD_CLEAR);
+	addCmd(conn->sendbuf, RQ_CMD_CLEAR);
 	if (queue->exclusive != 0)
-		addCmd(buf, RQ_CMD_EXCLUSIVE);
-	addCmdShortStr(buf, RQ_CMD_QUEUE, strlen(queue->queue), queue->queue);
-	addCmdInt(buf, RQ_CMD_MAX, queue->max);
-	addCmdShortInt(buf, RQ_CMD_PRIORITY, queue->priority);
-	addCmd(buf, RQ_CMD_CONSUME);
+		addCmd(conn->sendbuf, RQ_CMD_EXCLUSIVE);
+	addCmdShortStr(conn->sendbuf, RQ_CMD_QUEUE, strlen(queue->queue), queue->queue);
+	addCmdInt(conn->sendbuf, RQ_CMD_MAX, queue->max);
+	addCmdShortInt(conn->sendbuf, RQ_CMD_PRIORITY, queue->priority);
+	addCmd(conn->sendbuf, RQ_CMD_CONSUME);
 
-	rq_senddata(conn, BUF_DATA(buf), BUF_LENGTH(buf));
-	expbuf_clear(buf);
-	
-	// return the buffer to the bufpool.
-	expbuf_pool_return(conn->rq->bufpool, buf);
+	rq_senddata(conn, BUF_DATA(conn->sendbuf), BUF_LENGTH(conn->sendbuf));
+	expbuf_clear(conn->sendbuf);
 }
 
 
@@ -788,23 +776,25 @@ static void rq_connect_handler(int fd, short int flags, void *arg)
 
 		// now that we have connected, we should get a buffer to handle read data.
 		assert(conn->readbuf == NULL);
-		assert(conn->rq);
-		assert(conn->rq->bufpool);
-		conn->readbuf = expbuf_pool_new(conn->rq->bufpool, RQ_DEFAULT_BUFFSIZE);
-		assert(BUF_MAX(conn->readbuf) >= RQ_DEFAULT_BUFFSIZE);
+		conn->readbuf = expbuf_init(NULL, RQ_DEFAULT_BUFFSIZE);
 		assert(conn->readbuf);
-	
+
+		// we should also prepare the 'sendbuf' even though it wont be needed until we send something.
+		// better to create it now, rather than having to test for it and create it later.
+		assert(conn->sendbuf == NULL);
+		conn->sendbuf = expbuf_init(NULL, RQ_DEFAULT_BUFFSIZE);
+		assert(conn->sendbuf);
+		
 		// make sure our other buffers are empty, but keep in mind that our outbuf
 		// may have something in it by now.
 		assert(conn->inbuf == NULL);
 
 		// initialise the data portion of the 'conn' object.
 		assert(conn->rq);
-		assert(conn->rq->bufpool);
 		assert(conn->data == NULL);
 		conn->data = (rq_data_t *) malloc(sizeof(rq_data_t));
 		assert(conn->data);
-		rq_data_init(conn->data, conn->rq->bufpool);
+		rq_data_init(conn->data);
 
 		// apply the regular read handler now.
 		assert(conn->read_event == NULL);
@@ -893,10 +883,9 @@ void rq_addcontroller(
 	assert(conn->write_event == NULL);
 	assert(conn->connect_event == NULL);
 
-	assert(rq->bufpool);
 	assert(conn->readbuf == NULL);
 	assert(conn->inbuf == NULL);
-	conn->outbuf = expbuf_pool_new(rq->bufpool, 512);
+	conn->outbuf = expbuf_init(NULL, 512);
 	assert(conn->outbuf);
 
 	assert(rq->risp);
@@ -1109,7 +1098,6 @@ static void cmdRequest(void *ptr)
 	char *qname = NULL;
 	rq_queue_t *tmp, *queue;
 	rq_message_t *msg;
-	expbuf_t *buf;
 	
 	assert(conn);
 	assert(conn->data);
@@ -1147,29 +1135,23 @@ static void cmdRequest(void *ptr)
 
 		if (queue == NULL) {
 			// we dont seem to be consuming that queue...
-			assert(conn->rq);
-			assert(conn->rq->bufpool);
-			buf = expbuf_pool_new(conn->rq->bufpool, 8);
-			assert(buf);
-			addCmd(buf, RQ_CMD_CLEAR);
-			addCmdLargeInt(buf, RQ_CMD_ID, (short int)msgid);
-			addCmd(buf, RQ_CMD_UNDELIVERED);
-			rq_senddata(conn, BUF_DATA(buf), BUF_LENGTH(buf));
-			expbuf_clear(buf);
-			expbuf_pool_return(conn->rq->bufpool, buf);
+			assert(conn->sendbuf);
+			assert(BUF_LENGTH(conn->sendbuf) == 0);
+			addCmd(conn->sendbuf, RQ_CMD_CLEAR);
+			addCmdLargeInt(conn->sendbuf, RQ_CMD_ID, (short int)msgid);
+			addCmd(conn->sendbuf, RQ_CMD_UNDELIVERED);
+			rq_senddata(conn, BUF_DATA(conn->sendbuf), BUF_LENGTH(conn->sendbuf));
+			expbuf_clear(conn->sendbuf);
 		}
 		else {
 			// send a delivery message back to the controller.
-			assert(conn->rq);
-			assert(conn->rq->bufpool);
-			buf = expbuf_pool_new(conn->rq->bufpool, 8);
-			assert(buf);
-			addCmd(buf, RQ_CMD_CLEAR);
-			addCmdLargeInt(buf, RQ_CMD_ID, (short int)msgid);
-			addCmd(buf, RQ_CMD_DELIVERED);
-			rq_senddata(conn, BUF_DATA(buf), BUF_LENGTH(buf));
-			expbuf_clear(buf);
-			expbuf_pool_return(conn->rq->bufpool, buf);
+			assert(conn->sendbuf);
+			assert(BUF_LENGTH(conn->sendbuf) == 0);
+			addCmd(conn->sendbuf, RQ_CMD_CLEAR);
+			addCmdLargeInt(conn->sendbuf, RQ_CMD_ID, (short int)msgid);
+			addCmd(conn->sendbuf, RQ_CMD_DELIVERED);
+			rq_senddata(conn, BUF_DATA(conn->sendbuf), BUF_LENGTH(conn->sendbuf));
+			expbuf_clear(conn->sendbuf);
 
 			// get a new message object from the pool.
 			msg = rq_msg_new(conn->rq, conn);
@@ -1298,11 +1280,10 @@ static void cmdReply(void *ptr)
 		// replace the data buffer in the message, with the data buffer received with the reply.
 		assert(msg->data);
 		assert(conn->data->payload);
-		assert(conn->rq);
-		assert(conn->rq->bufpool);
 
 		expbuf_clear(msg->data);
-		expbuf_pool_return(conn->rq->bufpool, msg->data);
+		msg->data = expbuf_free(msg->data);
+		assert(msg->data == NULL);
 		msg->data = conn->data->payload;
 		conn->data->payload = NULL;
 
@@ -1434,8 +1415,7 @@ static void cmdPayload(void *ptr, risp_length_t length, risp_data_t *data)
 	assert(conn->data->payload == NULL);
 	if (conn->data->payload == NULL) {
 		assert(conn->rq);
-		assert(conn->rq->bufpool);
-		conn->data->payload = expbuf_pool_new(conn->rq->bufpool, length);
+		conn->data->payload = expbuf_init(NULL, length);
 		assert(conn->data->payload);
 	}
  	expbuf_set(conn->data->payload, data, length);
@@ -1499,11 +1479,8 @@ void rq_init(rq_t *rq)
 	rq->msg_used = 0;
 	rq->msg_next = 0;
 
-	rq->msg_pool = (list_t *) malloc(sizeof(list_t));
-	ll_init(rq->msg_pool);
-
-	rq->bufpool = (expbuf_pool_t *) malloc(sizeof(expbuf_pool_t));
-	expbuf_pool_init(rq->bufpool, 0);		// TODO: should we have a max to avoid having large buffers that are not necessary?
+	rq->msg_pool = ll_init(NULL);
+	assert(rq->msg_pool);
 }
 
 
@@ -1548,13 +1525,8 @@ rq_message_t * rq_msg_new(rq_t *rq, rq_conn_t *conn)
 	// need a data buffer, because the data is already in a buffer which we will
 	// be assigned.   If conn is null, it means that we are building a message
 	// and will therefore need a data buffer.
-	if (conn) {
-		msg->data = NULL;
-	}
-	else {
-		assert(rq->bufpool);
-		msg->data = expbuf_pool_new(rq->bufpool, 0);
-	}
+	if (conn) { msg->data = NULL; }
+	else { msg->data = expbuf_init(NULL, 0); }
 
 	// add the message to the message list.
 	assert(rq->msg_list);
@@ -1626,12 +1598,8 @@ void rq_msg_clear(rq_message_t *msg)
 	// clear the buffer, if we have one allocated.
 	if (msg->data) {
 		expbuf_clear(msg->data);
-	
-		// put the buffer back in the bufpool.
-		assert(msg->rq);
-		assert(msg->rq->bufpool);
-		expbuf_pool_return(msg->rq->bufpool, msg->data);
-		msg->data = NULL;
+		msg->data = expbuf_free(msg->data);
+		assert(msg->data == NULL);
 	}
 	
 	// return the message to the msgpool.
@@ -1694,7 +1662,6 @@ void rq_send(
 	void (*fail_handler)(rq_message_t *msg),
 	void *arg)
 {
-	expbuf_t *buf;
 	rq_conn_t *conn;
 	
 	assert(msg);
@@ -1720,24 +1687,23 @@ void rq_send(
 	if (conn && conn->active > 0 && conn->closing == 0) {
 
 		// get a buffer from the bufpool.
-		assert(msg->rq->bufpool);
-		buf = expbuf_pool_new(msg->rq->bufpool, 32);
+		assert(conn->sendbuf);
+		assert(BUF_LENGTH(conn->sendbuf) == 0);
 	
 		// send consume request to controller.
-		addCmd(buf, RQ_CMD_CLEAR);
-		addCmdLargeInt(buf, RQ_CMD_ID, msg->id);
-		addCmdShortStr(buf, RQ_CMD_QUEUE, strlen(msg->queue), (char *) msg->queue);
-		addCmdLargeStr(buf, RQ_CMD_PAYLOAD, BUF_LENGTH(msg->data), BUF_DATA(msg->data));
+		addCmd(conn->sendbuf, RQ_CMD_CLEAR);
+		addCmdLargeInt(conn->sendbuf, RQ_CMD_ID, msg->id);
+		addCmdShortStr(conn->sendbuf, RQ_CMD_QUEUE, strlen(msg->queue), (char *) msg->queue);
+		addCmdLargeStr(conn->sendbuf, RQ_CMD_PAYLOAD, BUF_LENGTH(msg->data), BUF_DATA(msg->data));
 
-		if (msg->noreply > 0) { addCmd(buf, RQ_CMD_NOREPLY); }
-		if (msg->broadcast > 0) { addCmd(buf, RQ_CMD_BROADCAST); }
-		else { addCmd(buf, RQ_CMD_REQUEST); }
+		if (msg->noreply > 0) { addCmd(conn->sendbuf, RQ_CMD_NOREPLY); }
+		if (msg->broadcast > 0) { addCmd(conn->sendbuf, RQ_CMD_BROADCAST); }
+		else { addCmd(conn->sendbuf, RQ_CMD_REQUEST); }
 	
-		rq_senddata(conn, BUF_DATA(buf), BUF_LENGTH(buf));
+		rq_senddata(conn, BUF_DATA(conn->sendbuf), BUF_LENGTH(conn->sendbuf));
 		
 		// return the buffer to the bufpool.
-		expbuf_clear(buf);
-		expbuf_pool_return(msg->rq->bufpool, buf);
+		expbuf_clear(conn->sendbuf);
 	}
 	else {
 		// We need to put the message in a linked list so that we do send it in the right order.
@@ -1761,8 +1727,6 @@ void rq_send(
 //	would have finished processing, it wasn't very safe.
 void rq_reply(rq_message_t *msg, int length, char *data)
 {
-	expbuf_t *buf;
-
 	assert(msg);
 	assert((length == 0 && data == NULL) || (length > 0 && data));
 	
@@ -1780,18 +1744,17 @@ void rq_reply(rq_message_t *msg, int length, char *data)
 
 	// get the send buffer from rq.
 	assert(msg->conn);
-	assert(msg->rq->bufpool);
-	buf = expbuf_pool_new(msg->rq->bufpool, 0);
-	addCmd(buf, RQ_CMD_CLEAR);
-	addCmdLargeInt(buf, RQ_CMD_ID, (short int) msg->src_id);
+	assert(msg->conn->sendbuf);
+	assert(BUF_LENGTH(msg->conn->sendbuf) == 0);
+	addCmd(msg->conn->sendbuf, RQ_CMD_CLEAR);
+	addCmdLargeInt(msg->conn->sendbuf, RQ_CMD_ID, (short int) msg->src_id);
 	if (length > 0) {
 		assert(data);
-		addCmdLargeStr(buf, RQ_CMD_PAYLOAD, length, data);
+		addCmdLargeStr(msg->conn->sendbuf, RQ_CMD_PAYLOAD, length, data);
 	}
-	addCmd(buf, RQ_CMD_REPLY);
-	rq_senddata(msg->conn, BUF_DATA(buf), BUF_LENGTH(buf));
-	expbuf_clear(buf);
-	expbuf_pool_return(msg->rq->bufpool, buf);
+	addCmd(msg->conn->sendbuf, RQ_CMD_REPLY);
+	rq_senddata(msg->conn, BUF_DATA(msg->conn->sendbuf), BUF_LENGTH(msg->conn->sendbuf));
+	expbuf_clear(msg->conn->sendbuf);
 
 	// if this reply is being sent after the message was delivered to the handler,
 	if (msg->state == rq_msgstate_delivered) {

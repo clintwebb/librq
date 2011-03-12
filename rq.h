@@ -4,7 +4,6 @@
 #include <event.h>
 #include <netdb.h>
 #include <expbuf.h>
-#include <expbufpool.h>
 #include <linklist.h>
 #include <risp.h>
 #include <rispbuf.h>
@@ -13,8 +12,8 @@
 // services can ensure that the correct version is installed.
 // This version number should be incremented with every change that would
 // effect logic.
-#define LIBRQ_VERSION  0x00010900
-#define LIBRQ_VERSION_NAME "v1.09.00"
+#define LIBRQ_VERSION  0x00010910
+#define LIBRQ_VERSION_NAME "v1.09.10"
 
 
 // include libevent.  If we are using 1.x version of libevent, we need to do 
@@ -93,9 +92,6 @@ typedef struct {
 	int msg_max;
 	int msg_used;
 	int msg_next;
-
-	// Buffer pool.
-	expbuf_pool_t *bufpool;
 } rq_t;
 
 
@@ -137,7 +133,7 @@ typedef struct {
 	risp_t *risp;
 	char *hostname;
 	
-	expbuf_t *inbuf, *outbuf, *readbuf;
+	expbuf_t *inbuf, *outbuf, *readbuf, *sendbuf;
 	rq_data_t *data;
 	
 } rq_conn_t;

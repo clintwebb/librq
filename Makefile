@@ -1,11 +1,23 @@
 ## make file for librq.
 
-all: librq.so.1.0.1
+
+PROJECT=librq
+OBJFILE=$(PROJECT).o
+MAINFILE=$(PROJECT).so
+LIBVER=1.0.1
+LIBFILE=$(MAINFILE).$(LIBVER)
+SONAME=$(MAINFILE).1
+DESTDIR=
+LIBDIR=$(DESTDIR)/usr/lib
+INCDIR=$(DESTDIR)/usr/include
 
 ARGS=-g -Wall
-OBJS=librq.o
+OBJS=$(OBJFILE)
 
-librq.o: librq.c rq.h 
+
+all: $(LIBFILE)
+
+$(OBJFILE): librq.c rq.h 
 	gcc -c -fPIC librq.c  -o $@ $(ARGS)
 
 
@@ -15,18 +27,17 @@ librq.a: $(OBJS)
 	ar -r $@
 	ar -r $@ $^
 
-librq.so.1.0.1: $(OBJS)
-	gcc -shared -Wl,-soname,librq.so.1 -o librq.so.1.0.1 $(OBJS)
+$(LIBFILE): $(OBJS)
+	gcc -shared -Wl,-soname,$(SONAME) -o $(LIBFILE) $(OBJS)
 	
 
-install: librq.so.1.0.1 rq.h
-	@-test -e /usr/include/rq.h && rm /usr/include/rq.h
-	cp rq.h /usr/include/
-	cp librq.so.1.0.1 /usr/lib/
-	@-test -e /usr/lib/librq.so && rm /usr/lib/librq.so
-	ln -s /usr/lib/librq.so.1.0.1 /usr/lib/librq.so
-	ldconfig
-	@echo "Install complete."
+install: $(LIBFILE)
+	cp $(LIBFILE) $(LIBDIR)/
+	@-test -e $(LIBDIR)/$(MAINFILE) && rm $(LIBDIR)/$(MAINFILE)
+	ln -s $(LIBDIR)/$(LIBFILE) $(LIBDIR)/$(MAINFILE)
+
+install_dev: rq.h
+	cp rq.h $(INCDIR)
 
 
 uninstall: /usr/include/rq.h /usr/lib/librq.so.1.0.1
